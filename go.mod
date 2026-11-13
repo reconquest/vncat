@@ -1,10 +1,11 @@
 module github.com/reconquest/vncat
 
-go 1.27.4
+go 1.26.0
 
 require (
 	github.com/charmbracelet/ultraviolet v0.0.0-20261023060817-a45b7c86333f
 	github.com/charmbracelet/x/ansi v0.11.9
+	github.com/kovetskiy/docopt-go v0.8.0
 	golang.org/x/image v0.25.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.30.0

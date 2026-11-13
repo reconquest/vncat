@@ -1,8 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
-	"sort"
+	"slices"
 	"unicode"
 	"unicode/utf8"
 
@@ -12,156 +13,191 @@ import (
 type legacyKeyEvent uv.Key
 
 type inputState struct {
-	client    *rfbClient
-	kitty     bool
-	held      map[rune]uint32
-	modifiers uv.KeyMod
-	buttons   byte
-	x, y      uint16
-	view      viewport
+	client        *rfbClient
+	kitty         bool
+	held          map[rune]uint32
+	heldModifiers map[rune]uv.KeyMod
+	modifiers     uv.KeyMod
+	buttons       byte
+	x, y          uint16
+	view          viewport
 }
 
-var modifierKeys = []struct {
+type modifierKey struct {
 	mod    uv.KeyMod
 	symbol uint32
-}{
-	{uv.ModShift, 0xffe1}, {uv.ModCtrl, 0xffe3}, {uv.ModAlt, 0xffe9},
-	{uv.ModSuper, 0xffeb}, {uv.ModHyper, 0xffed}, {uv.ModMeta, 0xffe7},
 }
 
-var specialKeys = map[rune]uint32{
-	uv.KeyBackspace: 0xff08, uv.KeyTab: 0xff09, uv.KeyEnter: 0xff0d,
-	uv.KeyEscape: 0xff1b, uv.KeyHome: 0xff50, uv.KeyLeft: 0xff51,
-	uv.KeyUp: 0xff52, uv.KeyRight: 0xff53, uv.KeyDown: 0xff54,
-	uv.KeyPgUp: 0xff55, uv.KeyPgDown: 0xff56, uv.KeyEnd: 0xff57,
-	uv.KeyBegin: 0xff58, uv.KeyInsert: 0xff63, uv.KeyDelete: 0xffff,
-	uv.KeyKpEnter: 0xff8d, uv.KeyCapsLock: 0xffe5, uv.KeyNumLock: 0xff7f,
-	uv.KeyScrollLock: 0xff14, uv.KeyPrintScreen: 0xff61, uv.KeyPause: 0xff13,
-	uv.KeyMenu:    0xff67,
-	uv.KeyKpEqual: 0xffbd, uv.KeyKpMultiply: 0xffaa,
-	uv.KeyKpPlus: 0xffab, uv.KeyKpMinus: 0xffad,
-	uv.KeyKpDecimal: 0xffae, uv.KeyKpDivide: 0xffaf,
-	uv.KeyKpHome: 0xff95, uv.KeyKpEnd: 0xff9c,
-	uv.KeyKpLeft: 0xff96, uv.KeyKpUp: 0xff97,
-	uv.KeyKpRight: 0xff98, uv.KeyKpDown: 0xff99,
-	uv.KeyKpPgUp: 0xff9a, uv.KeyKpPgDown: 0xff9b,
-	uv.KeyKpInsert: 0xff9e, uv.KeyKpDelete: 0xff9f,
-	uv.KeyIsoLevel3Shift: 0xfe03, uv.KeyIsoLevel5Shift: 0xfe11,
+const modifierCount = 6
+
+func modifierKeys() [modifierCount]modifierKey {
+	return [modifierCount]modifierKey{
+		{uv.ModShift, 0xffe1},
+		{uv.ModCtrl, 0xffe3},
+		{uv.ModAlt, 0xffe9},
+		{uv.ModSuper, 0xffeb},
+		{uv.ModHyper, 0xffed},
+		{uv.ModMeta, 0xffe7},
+	}
 }
 
-func (s *inputState) handle(event uv.Event) (bool, error) {
+func (state *inputState) handle(event uv.Event) (bool, error) {
 	switch event := event.(type) {
 	case uv.KeyboardEnhancementsEvent:
-		s.kitty = event.SupportsKeyReleases()
+		state.kitty = event.SupportsKeyReleases()
+
 	case legacyKeyEvent:
-		return s.press(uv.Key(event), false)
+		return state.press(uv.Key(event), false)
+
 	case uv.KeyPressEvent:
-		return s.press(uv.Key(event), s.kitty)
+		return state.press(uv.Key(event), state.kitty)
+
 	case uv.KeyReleaseEvent:
-		if !s.client.readonly {
-			return false, s.keyboard(uv.Key(event), false, true)
+		if !state.client.readonly {
+			return false, state.keyboard(uv.Key(event), false, true)
 		}
+
 	case uv.MouseEvent:
-		if !s.client.readonly {
-			return false, s.mouse(event)
+		if !state.client.readonly {
+			return false, state.mouse(event)
 		}
+
+	default:
+		return false, nil
 	}
+
 	return false, nil
 }
 
-func (s *inputState) press(key uv.Key, hold bool) (bool, error) {
+func (state *inputState) press(key uv.Key, hold bool) (bool, error) {
 	if key.Code == ']' && key.Mod.Contains(uv.ModCtrl) {
 		return true, nil
 	}
-	if s.client.readonly {
+
+	if state.client.readonly {
 		return false, nil
 	}
-	return false, s.keyboard(key, true, hold)
+
+	return false, state.keyboard(key, true, hold)
 }
 
-func (s *inputState) keyboard(key uv.Key, down, hold bool) error {
-	if s.held == nil {
-		s.held = make(map[rune]uint32)
+func (state *inputState) keyboard(key uv.Key, down, hold bool) error {
+	return state.transitionKey(key, keyTransition{down: down, hold: hold})
+}
+
+func (state *inputState) transitionKey(
+	key uv.Key,
+	transition keyTransition,
+) error {
+	if state.held == nil {
+		state.held = make(map[rune]uint32)
 	}
-	if mod := modifierFor(key.Code); mod != 0 {
-		desired := key.Mod
-		if down {
-			desired |= mod
-		} else {
-			desired &^= mod
-		}
-		return s.syncModifiers(desired)
+
+	modifierForMod := modifierFor(key.Code)
+	if modifierForMod != 0 {
+		return state.modifier(
+			key,
+			modifierForMod,
+			transition,
+		)
 	}
-	if err := s.syncModifiers(key.Mod); err != nil {
+
+	err := state.syncModifiers(key.Mod)
+	if err != nil {
 		return err
 	}
-	if !down {
-		symbol, ok := s.held[key.Code]
-		if !ok {
-			return nil
-		}
-		if err := s.client.key(symbol, false); err != nil {
-			return err
-		}
-		delete(s.held, key.Code)
-		return nil
+
+	if !transition.down {
+		return state.releaseKey(key.Code)
 	}
+
 	if key.Code == uv.KeyExtended {
-		for _, r := range key.Text {
-			symbol := runeSymbol(r)
-			if symbol == 0 {
-				continue
-			}
-			if err := s.client.key(symbol, true); err != nil {
-				return err
-			}
-			if err := s.client.key(symbol, false); err != nil {
-				return err
-			}
-		}
-		return s.syncModifiers(0)
+		return state.typeText(key.Text)
 	}
+
+	return state.pressSymbol(key, transition)
+}
+
+func (state *inputState) pressSymbol(
+	key uv.Key,
+	transition keyTransition,
+) error {
 	symbol := keySymbol(key)
 	if symbol == 0 {
 		return nil
 	}
-	previous, held := s.held[key.Code]
+
+	previous, held := state.held[key.Code]
 	if held {
 		symbol = previous
 	}
-	if !held && len(s.held) >= 256 {
+
+	if !held && len(state.held) >= 256 {
 		return errors.New("too many held keys")
 	}
-	s.held[key.Code] = symbol
-	if err := s.client.key(symbol, true); err != nil {
+
+	state.held[key.Code] = symbol
+
+	err := state.client.key(symbol, true)
+	if err != nil {
 		return err
 	}
-	if hold {
+
+	if transition.hold {
 		return nil
 	}
-	if err := s.client.key(symbol, false); err != nil {
+
+	err = state.client.key(symbol, false)
+	if err != nil {
 		return err
 	}
-	delete(s.held, key.Code)
-	return s.syncModifiers(0)
+
+	delete(state.held, key.Code)
+
+	return state.syncModifiers(0)
 }
 
-func (s *inputState) syncModifiers(desired uv.KeyMod) error {
-	for _, key := range modifierKeys {
-		before, after := s.modifiers.Contains(key.mod), desired.Contains(key.mod)
+func (state *inputState) syncModifiers(desired uv.KeyMod) error {
+	for _, mod := range state.heldModifiers {
+		desired |= mod
+	}
+
+	for _, key := range modifierKeys() {
+		before, after := state.modifiers.Contains(
+			key.mod,
+		), desired.Contains(
+			key.mod,
+		)
 		if before == after {
 			continue
 		}
-		if after {
-			s.modifiers |= key.mod
-		}
-		if err := s.client.key(key.symbol, after); err != nil {
+
+		err := state.transitionModifier(key, keyTransition{down: after})
+		if err != nil {
 			return err
 		}
-		if !after {
-			s.modifiers &^= key.mod
-		}
 	}
+
+	return nil
+}
+
+func (state *inputState) transitionModifier(
+	key modifierKey,
+	transition keyTransition,
+) error {
+	if transition.down {
+		state.modifiers |= key.mod
+	}
+
+	err := state.client.key(key.symbol, transition.down)
+	if err != nil {
+		return err
+	}
+
+	if !transition.down {
+		state.modifiers &^= key.mod
+	}
+
 	return nil
 }
 
@@ -169,111 +205,300 @@ func modifierFor(code rune) uv.KeyMod {
 	switch code {
 	case uv.KeyLeftShift, uv.KeyRightShift:
 		return uv.ModShift
+
 	case uv.KeyLeftCtrl, uv.KeyRightCtrl:
 		return uv.ModCtrl
+
 	case uv.KeyLeftAlt, uv.KeyRightAlt:
 		return uv.ModAlt
+
 	case uv.KeyLeftSuper, uv.KeyRightSuper:
 		return uv.ModSuper
+
 	case uv.KeyLeftHyper, uv.KeyRightHyper:
 		return uv.ModHyper
+
 	case uv.KeyLeftMeta, uv.KeyRightMeta:
 		return uv.ModMeta
+
+	default:
+		return 0
 	}
-	return 0
 }
 
 func keySymbol(key uv.Key) uint32 {
+	specialKeys := specialKeySymbols()
+
 	if symbol, ok := specialKeys[key.Code]; ok {
 		return symbol
 	}
+
 	if key.Code >= uv.KeyF1 && key.Code <= uv.KeyF35 {
 		return uint32(0xffbe + key.Code - uv.KeyF1)
 	}
+
 	if key.Code >= uv.KeyKp0 && key.Code <= uv.KeyKp9 {
 		return uint32(0xffb0 + key.Code - uv.KeyKp0)
 	}
+
+	return runeSymbol(textCode(key))
+}
+
+func textCode(key uv.Key) rune {
 	code := key.Code
-	if key.ShiftedCode != 0 && key.Mod.Contains(uv.ModShift) {
+	switch {
+	case key.ShiftedCode != 0 && key.Mod.Contains(uv.ModShift):
 		code = key.ShiftedCode
-	} else if utf8.RuneCountInString(key.Text) == 1 {
+
+	case utf8.RuneCountInString(key.Text) == 1:
 		code, _ = utf8.DecodeRuneInString(key.Text)
-	} else if key.Mod.Contains(uv.ModShift) {
+
+	case key.Mod.Contains(uv.ModShift):
 		code = unicode.ToUpper(code)
+
+	default:
 	}
-	return runeSymbol(code)
+
+	return code
 }
 
 func runeSymbol(code rune) uint32 {
 	if !utf8.ValidRune(code) || code < 32 || code == 127 {
 		return 0
 	}
-	if code <= 255 {
+
+	if code <= latin1Maximum {
 		return uint32(code)
 	}
-	return 0x01000000 | uint32(code)
+
+	return unicodeKeysymMask | uint32(code)
 }
 
-func (s *inputState) mouse(event uv.MouseEvent) error {
+func (state *inputState) mouse(event uv.MouseEvent) error {
 	mouse := event.Mouse()
-	x, y, inside := s.view.point(mouse.X, mouse.Y)
+	point, inside := state.view.point(mouse.X, mouse.Y)
 	_, release := event.(uv.MouseReleaseEvent)
-	if !inside && s.buttons == 0 && !release {
+
+	if !inside && state.buttons == 0 {
 		return nil
 	}
-	if s.view.width == 0 {
-		return nil
+
+	if state.view.width == 0 {
+		if !release || state.buttons == 0 {
+			return nil
+		}
+
+		point = remotePoint{x: state.x, y: state.y}
 	}
-	s.x, s.y = x, y
-	if err := s.syncModifiers(mouse.Mod); err != nil {
+
+	state.x, state.y = point.x, point.y
+
+	const mouseModifiers = uv.ModShift | uv.ModAlt | uv.ModCtrl
+
+	desired := state.modifiers&^mouseModifiers | mouse.Mod&mouseModifiers
+
+	err := state.syncModifiers(desired)
+	if err != nil {
 		return err
 	}
+
+	return state.mouseButton(event, point)
+}
+
+func (state *inputState) mouseButton(
+	event uv.MouseEvent,
+	point remotePoint,
+) error {
+	mouse := event.Mouse()
 	button := byte(0)
+
 	if mouse.Button >= uv.MouseLeft && mouse.Button <= uv.MouseWheelRight {
 		button = 1 << uint(mouse.Button-uv.MouseLeft)
 	}
+
 	switch event.(type) {
 	case uv.MouseClickEvent:
-		s.buttons |= button & 7
+		state.buttons |= button & pointerButtonMask
+
 	case uv.MouseReleaseEvent:
-		if button == 0 {
-			s.buttons = 0
+		if mouse.Button == uv.MouseNone {
+			state.buttons = 0
 		} else {
-			s.buttons &^= button
+			state.buttons &^= button
 		}
+
 	case uv.MouseWheelEvent:
-		if err := s.client.pointer(s.buttons|button, x, y); err != nil {
+		err := state.client.pointer(state.buttons|button, point.x, point.y)
+		if err != nil {
 			return err
 		}
+
+	default:
 	}
-	return s.client.pointer(s.buttons, x, y)
+
+	return state.client.pointer(state.buttons, point.x, point.y)
 }
 
-func (s *inputState) release() error {
-	if s.client.readonly {
+func (state *inputState) release() error {
+	if state.client.readonly {
 		return nil
 	}
-	symbols := make([]uint32, 0, len(s.held)+len(modifierKeys))
-	for _, symbol := range s.held {
-		symbols = append(symbols, symbol)
-	}
-	sort.Slice(symbols, func(i, j int) bool { return symbols[i] < symbols[j] })
-	for _, key := range modifierKeys {
-		if s.modifiers.Contains(key.mod) {
-			symbols = append(symbols, key.symbol)
-		}
-	}
-	msg := make([]byte, 0, len(symbols)*8+6)
-	for _, symbol := range symbols {
-		msg = append(msg, 4, 0, 0, 0, byte(symbol>>24), byte(symbol>>16), byte(symbol>>8), byte(symbol))
-	}
-	if s.buttons != 0 {
-		msg = append(msg, 5, 0, byte(s.x>>8), byte(s.x), byte(s.y>>8), byte(s.y))
-	}
-	clear(s.held)
-	s.modifiers, s.buttons = 0, 0
+
+	symbols := state.releaseSymbols()
+	msg := state.releaseMessage(symbols)
+	clear(state.held)
+	clear(state.heldModifiers)
+
+	state.modifiers, state.buttons = 0, 0
+
 	if len(msg) == 0 {
 		return nil
 	}
-	return s.client.write(msg)
+
+	return state.client.write(msg)
+}
+
+func (state *inputState) releaseSymbols() []uint32 {
+	symbols := make([]uint32, 0, len(state.held)+modifierCount)
+	for _, symbol := range state.held {
+		symbols = append(symbols, symbol)
+	}
+
+	slices.Sort(symbols)
+
+	for _, key := range modifierKeys() {
+		if state.modifiers.Contains(key.mod) {
+			symbols = append(symbols, key.symbol)
+		}
+	}
+
+	return symbols
+}
+
+func (state *inputState) releaseMessage(symbols []uint32) []byte {
+	msg := make([]byte, 0, len(symbols)*8+pointerMessageSize)
+	for _, symbol := range symbols {
+		msg = append(msg, clientKeyMessage, 0, 0, 0)
+		msg = binary.BigEndian.AppendUint32(msg, symbol)
+	}
+
+	if state.buttons != 0 {
+		msg = append(msg, clientPointerMessage, 0)
+		msg = binary.BigEndian.AppendUint16(msg, state.x)
+		msg = binary.BigEndian.AppendUint16(msg, state.y)
+	}
+
+	return msg
+}
+
+func (state *inputState) modifier(
+	key uv.Key,
+	mod uv.KeyMod,
+	transition keyTransition,
+) error {
+	if transition.hold {
+		if state.heldModifiers == nil {
+			state.heldModifiers = make(map[rune]uv.KeyMod)
+		}
+
+		if transition.down {
+			state.heldModifiers[key.Code] = mod
+		} else {
+			delete(state.heldModifiers, key.Code)
+		}
+	}
+
+	desired := key.Mod
+	if transition.down {
+		desired |= mod
+	} else {
+		desired &^= mod
+	}
+
+	return state.syncModifiers(desired)
+}
+
+func (state *inputState) releaseKey(code rune) error {
+	symbol, ok := state.held[code]
+	if !ok {
+		return nil
+	}
+
+	err := state.client.key(symbol, false)
+	if err != nil {
+		return err
+	}
+
+	delete(state.held, code)
+
+	return nil
+}
+
+func (state *inputState) typeText(text string) error {
+	for _, code := range text {
+		symbol := runeSymbol(code)
+		if symbol == 0 {
+			continue
+		}
+
+		err := state.client.key(symbol, true)
+		if err != nil {
+			return err
+		}
+
+		err = state.client.key(symbol, false)
+		if err != nil {
+			return err
+		}
+	}
+
+	return state.syncModifiers(0)
+}
+
+func specialKeySymbols() map[rune]uint32 {
+	return map[rune]uint32{
+		uv.KeyBackspace:      keysymBackspace,
+		uv.KeyTab:            keysymTab,
+		uv.KeyEnter:          keysymEnter,
+		uv.KeyEscape:         keysymEscape,
+		uv.KeyHome:           keysymHome,
+		uv.KeyLeft:           keysymLeft,
+		uv.KeyUp:             keysymUp,
+		uv.KeyRight:          keysymRight,
+		uv.KeyDown:           keysymDown,
+		uv.KeyPgUp:           keysymPgUp,
+		uv.KeyPgDown:         keysymPgDown,
+		uv.KeyEnd:            keysymEnd,
+		uv.KeyBegin:          keysymBegin,
+		uv.KeyInsert:         keysymInsert,
+		uv.KeyDelete:         keysymDelete,
+		uv.KeyKpEnter:        keysymKpEnter,
+		uv.KeyCapsLock:       keysymCapsLock,
+		uv.KeyNumLock:        keysymNumLock,
+		uv.KeyScrollLock:     keysymScrollLock,
+		uv.KeyPrintScreen:    keysymPrintScreen,
+		uv.KeyPause:          keysymPause,
+		uv.KeyMenu:           keysymMenu,
+		uv.KeyKpEqual:        keysymKpEqual,
+		uv.KeyKpMultiply:     keysymKpMultiply,
+		uv.KeyKpPlus:         keysymKpPlus,
+		uv.KeyKpMinus:        keysymKpMinus,
+		uv.KeyKpSep:          keysymKpSep,
+		uv.KeyKpComma:        keysymKpComma,
+		uv.KeyKpDecimal:      keysymKpDecimal,
+		uv.KeyKpDivide:       keysymKpDivide,
+		uv.KeyKpHome:         keysymKpHome,
+		uv.KeyKpEnd:          keysymKpEnd,
+		uv.KeyKpBegin:        keysymKpBegin,
+		uv.KeyKpLeft:         keysymKpLeft,
+		uv.KeyKpUp:           keysymKpUp,
+		uv.KeyKpRight:        keysymKpRight,
+		uv.KeyKpDown:         keysymKpDown,
+		uv.KeyKpPgUp:         keysymKpPgUp,
+		uv.KeyKpPgDown:       keysymKpPgDown,
+		uv.KeyKpInsert:       keysymKpInsert,
+		uv.KeyKpDelete:       keysymKpDelete,
+		uv.KeyIsoLevel3Shift: keysymIsoLevel3Shift,
+		uv.KeyIsoLevel5Shift: keysymIsoLevel5Shift,
+	}
 }

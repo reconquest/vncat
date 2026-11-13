@@ -1,0 +1,303 @@
+version: "2"
+
+run:
+  timeout: 5m
+  relative-path-mode: gomod
+  modules-download-mode: readonly
+
+issues:
+  # Keep full output visible while we fix the accepted style/correctness rules.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  # Keep every shipped linter visible by default, then disable only classes we
+  # reviewed and decided are not useful for this codebase.
+  default: all
+  disable:
+    # Deprecated in favor of gomodguard_v2.
+    - gomodguard
+    # Declaration ordering is a local readability choice, not a CI gate.
+    - decorder
+    # Dynamic CLI validation errors do not need sentinel error variables.
+    - err113
+    # Zero-value struct literals are intentional in this code and tests.
+    - exhaustruct
+    - exhaustruct_v5
+    # Method order should follow lifecycle/readability instead of alphabetic order.
+    - funcorder
+    # Command packages do not need private/test godoc enforcement.
+    - godoclint
+    # The local module path is intentional.
+    - gomoddirectives
+    # gofmt/goimports already handle import grouping clearly enough.
+    - grouper
+    # No import alias policy is needed for ordinary stdlib imports.
+    - importas
+    # Micro-optimizing fmt usage is not worth blocking review.
+    - perfsprint
+    # Deprecated in favor of wsl_v5.
+    - wsl
+  settings:
+    bodyclose:
+      check-consumption: true
+    copyloopvar:
+      check-alias: true
+    cyclop:
+      max-complexity: 10
+      # Keep per-function complexity, but the package-average threshold was too
+      # noisy; retain only the per-function gate.
+      package-average: 0
+    depguard:
+      rules:
+        project-imports:
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/reconquest/vncat
+            - github.com/charmbracelet/ultraviolet
+            - github.com/charmbracelet/x/ansi
+            - github.com/kovetskiy/docopt-go
+            - golang.org/x/image
+            - golang.org/x/sys
+            - golang.org/x/term
+    embeddedstructfieldcheck:
+      forbid-mutex: true
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      disable-default-exclusions: true
+    errchkjson:
+      check-error-free-encoding: true
+      report-no-exported: true
+    exhaustive:
+      check:
+        - switch
+        - mapliteral
+      default-case-required: true
+    fatcontext:
+      check-struct-pointers: true
+    forbidigo:
+      analyze-types: true
+      exclude-godoc-examples: false
+    ginkgolinter:
+      forbid-focus-container: true
+      force-expect-to: true
+      validate-async-intervals: true
+      forbid-spec-pollution: true
+      force-succeed: true
+      force-assertion-description: true
+      force-tonot: true
+    gochecksumtype:
+      default-signifies-exhaustive: false
+      include-shared-interfaces: true
+    gocognit:
+      min-complexity: 20
+    goconst:
+      min-occurrences: 4
+      numbers: false
+      ignore-calls: true
+      ignore-tests: true
+      find-duplicates: false
+      eval-const-expressions: false
+    gocritic:
+      enable-all: true
+    gocyclo:
+      min-complexity: 10
+    godot:
+      scope: all
+      capital: true
+    gomodguard_v2:
+      local-replace-directives: true
+      allowed:
+        - module: github.com/charmbracelet/ultraviolet
+        - module: github.com/charmbracelet/x/ansi
+        - module: github.com/kovetskiy/docopt-go
+        - module: golang.org/x/image
+        - module: golang.org/x/sys
+        - module: golang.org/x/term
+    gosec:
+      excludes:
+        # errcheck owns unhandled-error policy; blank assignment is accepted.
+        - G104
+      config:
+        global:
+          # Allow documented #nosec suppressions for intentional subprocess and
+          # permission cases.
+          nosec: false
+          show-ignored: false
+          audit: true
+    govet:
+      enable-all: true
+      disable:
+        # Table-driven test cases intentionally leave bool/pointer fields
+        # out of order; field alignment is micro-optimization, not a real bug.
+        - fieldalignment
+      settings:
+        shadow:
+          strict: true
+    ineffassign:
+      check-escaping-errors: true
+    iotamixing:
+      report-individual: true
+    loggercheck:
+      require-string-key: true
+      no-printf-like: true
+    makezero:
+      always: true
+    nilnil:
+      only-two: false
+      detect-opposite: true
+    nolintlint:
+      require-specific: true
+      require-explanation: true
+    nonamedreturns:
+      report-error-in-defer: true
+    paralleltest:
+      # Keep misuse checks, but do not force every env/process/network test to
+      # call t.Parallel().
+      ignore-missing: true
+      ignore-missing-subtests: true
+      check-cleanup: true
+    prealloc:
+      for-loops: true
+    predeclared:
+      qualified-name: true
+    promlinter:
+      strict: true
+    protogetter:
+      replace-first-arg-in-append: true
+    revive:
+      enable-all-rules: true
+      rules:
+        - name: add-constant
+          disabled: true
+        - name: line-length-limit
+          arguments: [80]
+        - name: package-comments
+          disabled: true
+    tagalign:
+      strict: true
+    testifylint:
+      enable-all: true
+      formatter:
+        require-f-funcs: true
+    unparam:
+      check-exported: true
+    unqueryvet:
+      check-n1: true
+      check-sql-injection: true
+      check-tx-leaks: true
+    unused:
+      field-writes-are-uses: false
+      exported-fields-are-used: false
+      parameters-are-used: false
+      local-variables-are-used: false
+      generated-is-used: false
+    usestdlibvars:
+      time-date-month: true
+      time-month: true
+      time-layout: true
+      crypto-hash: true
+      default-rpc-path: true
+      sql-isolation-level: true
+      tls-signature-scheme: true
+      constant-kind: true
+    usetesting:
+      os-temp-dir: true
+      context-background: true
+      context-todo: true
+    varnamelen:
+      check-receiver: true
+      check-return: true
+      check-type-param: true
+      ignore-type-assert-ok: true
+      ignore-map-index-ok: true
+      ignore-chan-recv-ok: true
+    whitespace:
+      # These conflict with revive empty-lines/wsl_v5 for multiline blocks.
+      multi-if: false
+      multi-func: false
+    wrapcheck:
+      report-internal-errors: false
+    wsl_v5:
+      default: all
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+      case-max-lines: 1
+  exclusions:
+    generated: strict
+    rules:
+      - path: ^cmd/vncat/rfb\.go$
+        text: '^G502: Blocklisted import crypto/des:'
+        source: '^\s*"crypto/des"$'
+        linters:
+          - gosec
+      - path: ^cmd/vncat/rfb\.go$
+        text: '^G405: Use of weak cryptographic primitive'
+        source: '^\s*cipher, _ := des\.NewCipher\(key\[:\]\)$'
+        linters:
+          - gosec
+      - path: ^cmd/vncat/terminal_test\.go$
+        text: '^G204: Subprocess launched with variable'
+        source: '^\s*command := exec\.CommandContext\(t\.Context\(\), executable, args\.\.\.\)$'
+        linters:
+          - gosec
+      - path: _test\.go
+        linters:
+          # Table-driven tests are often intentionally branchy; keep the
+          # behavior assertions together and leave production complexity gates on.
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+      - path: _test\.go
+        text: "function-length:"
+        linters:
+          - revive
+      - path: _test\.go
+        text: "cognitive-complexity:"
+        linters:
+          - revive
+      - path: _test\.go
+        text: "cyclomatic:"
+        linters:
+          - revive
+
+formatters:
+  # Use this same formatter inventory for lint and fix commands.
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    - golines
+    - swaggo
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - blank
+        - dot
+        - alias
+        - localmodule
+      no-inline-comments: true
+      no-prefix-comments: true
+      custom-order: true
+    gofumpt:
+      module-path: github.com/reconquest/vncat
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes:
+        - github.com/reconquest/vncat
+    golines:
+      max-len: 80
+      shorten-comments: true
+  exclusions:
+    generated: strict
+    paths:
+      - ^(deps|build)/
+    warn-unused: true
