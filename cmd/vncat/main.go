@@ -100,7 +100,6 @@ func run(ctx context.Context, options arguments) (result error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return errors.New("stdin and stdout must be terminals")
 	}
-	fmt.Fprintln(os.Stderr, "vncat: Ctrl-] quits locally; Ctrl-C is forwarded to VNC")
 	terminal, err := openTerminal(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
@@ -162,6 +161,9 @@ func serve(
 	if err != nil {
 		return err
 	}
+	if _, err := render(terminal.output, nil, size, client.readonly); err != nil {
+		return err
+	}
 	refresh := time.NewTicker(time.Second / 30)
 	defer refresh.Stop()
 	capabilities := time.NewTimer(2 * time.Second)
@@ -196,6 +198,10 @@ func serve(
 		case <-resizes:
 			cellSizeReported = false
 			size, err = readSize(int(terminal.input.Fd()), size)
+			if err != nil {
+				return err
+			}
+			state.view, err = render(terminal.output, nil, size, client.readonly)
 			if err != nil {
 				return err
 			}
@@ -241,7 +247,7 @@ func serve(
 			if !dirty || frame == nil || !graphicsReady || !size.ready() {
 				continue
 			}
-			view, err := render(terminal.output, frame, size)
+			view, err := render(terminal.output, frame, size, client.readonly)
 			if err != nil {
 				return err
 			}

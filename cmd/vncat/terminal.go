@@ -18,7 +18,9 @@ import (
 const enterScreen = "\x1b[?1049h\x1b[?25s\x1b[?25l\x1b[2J\x1b[H"
 const enterInput = "\x1b[?1000s\x1b[?1002s\x1b[?1003s\x1b[?1006s" +
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003h\x1b[?1006h\x1b[>15u\x1b[?u"
-const leaveScreen = "\x1b_Ga=d,d=I,i=1,q=2\x1b\\" +
+const beginSync = "\x1b[?2026h"
+const endSync = "\x1b[?2026l"
+const leaveScreen = "\x1b\\" + endSync + "\x1b_Ga=d,d=I,i=1,q=2\x1b\\" +
 	"\x1b_Ga=d,d=I,i=31,q=2\x1b\\\x1b[?25h\x1b[?25r\x1b[?1049l"
 const leaveInput = "\x1b[<u\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l" +
 	"\x1b[?1006r\x1b[?1003r\x1b[?1002r\x1b[?1000r"

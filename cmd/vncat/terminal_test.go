@@ -69,8 +69,12 @@ func TestTerminalRestorationAndOutputFailure(t *testing.T) {
 			if err := session.enableInput(); err != nil {
 				t.Fatal(err)
 			}
+			cleanupStart := output.Len()
 			if err := session.close(); err != nil {
 				t.Fatal(err)
+			}
+			if !strings.Contains(output.String()[cleanupStart:], "\x1b\\\x1b[?2026l\x1b_Ga=d") {
+				t.Fatal("cleanup did not end synchronization before deleting image")
 			}
 			if err := session.close(); err != nil {
 				t.Fatal(err)
@@ -265,6 +269,9 @@ func TestCommandLifecycle(t *testing.T) {
 	for _, mode := range []string{"quit", "readonly", "signal", "disconnect"} {
 		t.Run(mode, func(t *testing.T) {
 			master, slave := openPTY(t)
+			if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Col: 40, Row: 5, Xpixel: 320, Ypixel: 80}); err != nil {
+				t.Fatal(err)
+			}
 			original, err := term.GetState(int(slave.Fd()))
 			if err != nil {
 				t.Fatal(err)
@@ -337,14 +344,33 @@ func TestCommandLifecycle(t *testing.T) {
 			}
 			defer conn.Close()
 			waitFor(t, func() bool { return strings.Contains(outputText(), "a=T") })
+			status := "Ctrl-] quit | interactive"
+			if mode == "readonly" {
+				status = "Ctrl-] quit | readonly"
+			}
+			if !strings.Contains(outputText(), "\x1b[5;1H\x1b[2K"+status+"\x1b[H") {
+				t.Fatal("missing live quit hint and mode")
+			}
+			if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Col: 32, Row: 1, Xpixel: 256, Ypixel: 16}); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Process.Signal(unix.SIGWINCH); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, func() bool {
+				return strings.Contains(outputText(), "\x1b[1;1H\x1b[2K"+status+"\x1b[H")
+			})
 			initialFrames := strings.Count(outputText(), "a=T")
-			if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Col: 12, Row: 4, Xpixel: 96, Ypixel: 64}); err != nil {
+			if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Col: 32, Row: 4, Xpixel: 256, Ypixel: 64}); err != nil {
 				t.Fatal(err)
 			}
 			if err := command.Process.Signal(unix.SIGWINCH); err != nil {
 				t.Fatal(err)
 			}
 			waitFor(t, func() bool { return strings.Count(outputText(), "a=T") > initialFrames })
+			if !strings.Contains(outputText(), "\x1b[4;1H\x1b[2K"+status+"\x1b[H") {
+				t.Fatal("footer not redrawn after resize")
+			}
 			if _, err := master.Write([]byte("\x1b[99;5u\x1b[<0;2;2M\x1b[<32;3;2M\x1b[<64;3;2M")); err != nil {
 				t.Fatal(err)
 			}

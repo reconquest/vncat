@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image"
@@ -28,7 +29,7 @@ func (s terminalSize) ready() bool {
 
 func fit(frame image.Rectangle, size terminalSize) (viewport, error) {
 	width, height := frame.Dx(), frame.Dy()
-	if width <= 0 || height <= 0 || !size.ready() {
+	if width <= 0 || height <= 0 || !size.ready() || size.rows < 2 {
 		return viewport{}, errors.New("terminal pixel dimensions unavailable")
 	}
 	if size.columns > 65535/size.cellWidth ||
@@ -36,7 +37,7 @@ func fit(frame image.Rectangle, size terminalSize) (viewport, error) {
 		return viewport{}, errors.New("terminal dimensions exceed render limit")
 	}
 	availableWidth := size.columns * size.cellWidth
-	availableHeight := size.rows * size.cellHeight
+	availableHeight := (size.rows - 1) * size.cellHeight
 	if availableWidth > maxPixels/availableHeight {
 		return viewport{}, errors.New("terminal dimensions exceed render limit")
 	}
@@ -53,25 +54,59 @@ func fit(frame image.Rectangle, size terminalSize) (viewport, error) {
 	}, nil
 }
 
-func render(w io.Writer, frame *image.RGBA, size terminalSize) (viewport, error) {
-	view, err := fit(frame.Rect, size)
-	if err != nil {
+func render(w io.Writer, frame *image.RGBA, size terminalSize, readonly bool) (view viewport, result error) {
+	var output bytes.Buffer
+	output.WriteString(beginSync + "\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[2J\x1b[H")
+	if err := renderStatus(&output, size, readonly); err != nil {
 		return viewport{}, err
 	}
-	scaled := image.NewRGBA(image.Rect(0, 0, view.width, view.height))
-	draw.ApproxBiLinear.Scale(scaled, scaled.Rect, frame, frame.Rect, draw.Src, nil)
-	if _, err := io.WriteString(w, "\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[H"); err != nil {
-		return viewport{}, err
+	if frame != nil && size.rows >= 2 && size.columns >= 1 {
+		var err error
+		view, err = fit(frame.Rect, size)
+		if err != nil {
+			return viewport{}, err
+		}
+		scaled := image.NewRGBA(image.Rect(0, 0, view.width, view.height))
+		draw.ApproxBiLinear.Scale(scaled, scaled.Rect, frame, frame.Rect, draw.Src, nil)
+		options := kitty.Options{
+			Action: kitty.TransmitAndPut, Transmission: kitty.Direct,
+			Format: kitty.PNG, ID: 1, PlacementID: 1,
+			Quiet: 1, Chunk: true, DoNotMoveCursor: true,
+		}
+		if err := kitty.EncodeGraphics(&output, scaled, &options); err != nil {
+			return viewport{}, fmt.Errorf("encode Kitty graphics: %w", err)
+		}
 	}
-	options := kitty.Options{
-		Action: kitty.TransmitAndPut, Transmission: kitty.Direct,
-		Format: kitty.PNG, ID: 1, PlacementID: 1,
-		Quiet: 1, Chunk: true, DoNotMoveCursor: true,
+	defer func() {
+		sequence := endSync
+		if result != nil {
+			sequence = "\x1b\\" + sequence
+		}
+		n, err := io.WriteString(w, sequence)
+		if n < len(sequence) && err == nil {
+			err = io.ErrShortWrite
+		}
+		result = errors.Join(result, err)
+		if result != nil {
+			view = viewport{}
+		}
+	}()
+	_, result = output.WriteTo(w)
+	return view, result
+}
+
+func renderStatus(w io.Writer, size terminalSize, readonly bool) error {
+	if size.columns < 1 || size.rows < 1 {
+		return nil
 	}
-	if err := kitty.EncodeGraphics(w, scaled, &options); err != nil {
-		return viewport{}, fmt.Errorf("write Kitty graphics: %w", err)
+	mode := "interactive"
+	if readonly {
+		mode = "readonly"
 	}
-	return view, nil
+	status := "Ctrl-] quit | " + mode
+	status = status[:min(len(status), size.columns)]
+	_, err := fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K%s\x1b[H", size.rows, status)
+	return err
 }
 
 func (v viewport) point(x, y int) (uint16, uint16, bool) {
