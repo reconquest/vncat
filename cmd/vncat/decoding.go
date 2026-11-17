@@ -14,9 +14,10 @@ import (
 type decodedEvent struct{ value uv.Event }
 
 type eventDecoder struct {
-	decoder uv.EventDecoder
-	pending []byte
-	kitty   bool
+	decoder     uv.EventDecoder
+	pending     []byte
+	kitty       bool
+	mousePixels bool
 }
 
 func (decoder *eventDecoder) feed(
@@ -28,6 +29,8 @@ func (decoder *eventDecoder) feed(
 	events := make([]uv.Event, 0)
 
 	for len(decoder.pending) > 0 {
+		decoder.discardInterruptedMouse()
+
 		size, err := decoder.nextSequence(inputTimeout{expired: expired})
 		if err != nil {
 			return nil, err
@@ -59,13 +62,21 @@ func (decoder *eventDecoder) nextSequence(timeout inputTimeout) (int, error) {
 		return size, nil
 	}
 
+	return decoder.expireSequence(), nil
+}
+
+func (decoder *eventDecoder) expireSequence() int {
+	if sgrMouseSequence(decoder.pending) {
+		return 0
+	}
+
 	if len(decoder.pending) > 2 || decoder.pending[0] != 27 {
 		decoder.pending = nil
 
-		return 0, nil
+		return 0
 	}
 
-	return len(decoder.pending), nil
+	return len(decoder.pending)
 }
 
 func (decoder *eventDecoder) correctAlternateKeys(
@@ -192,6 +203,10 @@ func sequenceLength(data []byte) int {
 		}
 	}
 
+	if prefix > 0 && sgrMouseSequence(data[prefix:]) {
+		return 1
+	}
+
 	size := unprefixedSequenceLength(data[prefix:])
 	if size == 0 {
 		return 0
@@ -236,10 +251,17 @@ func streamInput(
 	descriptor int,
 	events chan<- uv.Event,
 ) error {
-	var (
-		decoder eventDecoder
-		data    [1024]byte
-	)
+	var decoder eventDecoder
+
+	return decoder.streamInput(ctx, descriptor, events)
+}
+
+func (decoder *eventDecoder) streamInput(
+	ctx context.Context,
+	descriptor int,
+	events chan<- uv.Event,
+) error {
+	var data [1024]byte
 
 	last := time.Now()
 
@@ -311,6 +333,10 @@ func (decoder *eventDecoder) decodeSequence(
 	sequence []byte,
 	events []uv.Event,
 ) ([]uv.Event, error) {
+	if sgrMouseSequence(sequence) {
+		return decoder.appendSGRMouse(sequence, events), nil
+	}
+
 	count, value := decoder.decoder.Decode(sequence)
 	if count <= 0 || count > len(sequence) {
 		return nil, errors.New("terminal decoder made invalid progress")
@@ -374,27 +400,31 @@ func (decoder *eventDecoder) streamStep(
 	data []byte,
 	last *time.Time,
 ) error {
-	count, err := pollInput(ctx, fd, data)
+	decoded, err := decoder.readEvents(ctx, fd, data, last)
 	if err != nil {
 		return err
+	}
+
+	return publishEvents(ctx, events, decoded)
+}
+
+func (decoder *eventDecoder) readEvents(
+	ctx context.Context,
+	fd int,
+	data []byte,
+	last *time.Time,
+) ([]uv.Event, error) {
+	count, err := pollInput(ctx, fd, data)
+	if err != nil {
+		return nil, err
 	}
 
 	if count > 0 {
 		*last = time.Now()
 	}
 
-	decoded, err := decoder.feed(
+	return decoder.feed(
 		data[:count],
 		time.Since(*last) > 75*time.Millisecond,
 	)
-	if err != nil {
-		return err
-	}
-
-	err = publishEvents(ctx, events, decoded)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

@@ -42,6 +42,11 @@ func serve(
 	terminal *terminalSession,
 	resizes <-chan os.Signal,
 ) error {
+	err := terminal.negotiateMouse(parent)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithCancel(parent)
 	session := desktopSession{
 		terminal: terminal,
@@ -64,9 +69,7 @@ func serve(
 		func() { session.networkDone <- client.stream(ctx, session.frames) },
 	)
 	session.workers.Go(func() {
-		session.inputDone <- streamInput(
-			ctx, int(terminal.input.Fd()), session.events,
-		)
+		session.inputDone <- terminal.streamInput(ctx, session.events)
 	})
 
 	result := session.loop(ctx)

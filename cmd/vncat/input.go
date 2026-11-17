@@ -57,10 +57,16 @@ func (state *inputState) handle(event uv.Event) (bool, error) {
 			return false, state.keyboard(uv.Key(event), false, true)
 		}
 
+	case pixelMouseEvent:
+		point, inside := state.view.pixelPoint(event.x, event.y)
+
+		return false, state.forwardMouse(
+			event.event,
+			mouseTarget{point, inside},
+		)
+
 	case uv.MouseEvent:
-		if !state.client.readonly {
-			return false, state.mouse(event)
-		}
+		return false, state.mouse(event)
 
 	default:
 		return false, nil
@@ -274,17 +280,36 @@ func runeSymbol(code rune) uint32 {
 	return unicodeKeysymMask | uint32(code)
 }
 
+type mouseTarget struct {
+	point  remotePoint
+	inside bool
+}
+
 func (state *inputState) mouse(event uv.MouseEvent) error {
 	mouse := event.Mouse()
 	point, inside := state.view.point(mouse.X, mouse.Y)
+
+	return state.forwardMouse(event, mouseTarget{point, inside})
+}
+
+func (state *inputState) forwardMouse(
+	event uv.MouseEvent,
+	target mouseTarget,
+) error {
+	if state.client.readonly {
+		return nil
+	}
+
+	point := target.point
+	mouse := event.Mouse()
 	_, release := event.(uv.MouseReleaseEvent)
 
-	if !inside && state.buttons == 0 {
+	if !target.inside && state.buttons == 0 {
 		return nil
 	}
 
 	if state.view.width == 0 {
-		if !release || state.buttons == 0 {
+		if !release {
 			return nil
 		}
 

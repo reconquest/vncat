@@ -11,12 +11,15 @@ import (
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
+
+	uv "github.com/charmbracelet/ultraviolet"
 )
 
 const (
 	enterScreen = "\x1b[?1049h\x1b[?25s\x1b[?25l\x1b[2J\x1b[H"
 	enterInput  = "\x1b[?1000s\x1b[?1002s\x1b[?1003s\x1b[?1006s" +
-		"\x1b[?1000l\x1b[?1002l\x1b[?1003h\x1b[?1006h\x1b[>15u\x1b[?u"
+		"\x1b[?1016s\x1b[?1000l\x1b[?1002l\x1b[?1003l" +
+		"\x1b[?1016$p\x1b[?1016l\x1b[?1006h\x1b[>15u\x1b[?u"
 )
 
 const (
@@ -26,8 +29,12 @@ const (
 		"\x1b_Ga=d,d=I,i=31,q=2\x1b\\\x1b[?25h\x1b[?25r\x1b[?1049l"
 )
 
-const leaveInput = "\x1b[<u\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l" +
-	"\x1b[?1006r\x1b[?1003r\x1b[?1002r\x1b[?1000r"
+const (
+	leaveInputEncoding = "\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1000l" +
+		"\x1b[?1016l\x1b[?1006l\x1b[?1016r\x1b[?1006r"
+	restoreMouseTracking = "\x1b[?1003r\x1b[?1002r\x1b[?1000r"
+	leaveInput           = leaveInputEncoding + restoreMouseTracking
+)
 
 const (
 	querySize     = "\x1b[16t\x1b[14t"
@@ -35,14 +42,17 @@ const (
 )
 
 type terminalSession struct {
-	input        *os.File
-	output       io.Writer
-	state        *term.State
-	snapshot     *snapshotPresentation
-	tmux         *tmuxGraphics
-	tmuxSupport  tmuxCapabilities
-	tmuxActive   bool
-	inputEnabled bool
+	input               *os.File
+	output              io.Writer
+	state               *term.State
+	snapshot            *snapshotPresentation
+	tmux                *tmuxGraphics
+	tmuxSupport         tmuxCapabilities
+	tmuxActive          bool
+	inputEnabled        bool
+	mouseOriginalPixels bool
+	inputDecoder        eventDecoder
+	initialEvents       []uv.Event
 }
 
 func openTerminal(input *os.File, output io.Writer) (*terminalSession, error) {
@@ -70,6 +80,10 @@ func (session *terminalSession) enableInput() error {
 	if session.snapshot == nil {
 		session.inputEnabled = true
 		queries = enterInput + queries
+
+		if session.tmux == nil {
+			queries += "\x1b[>q"
+		}
 	}
 
 	_, err := io.WriteString(session.output, queries)
@@ -92,7 +106,12 @@ func (session *terminalSession) close() error {
 	}
 
 	if session.inputEnabled {
-		_, outputError = io.WriteString(session.output, leaveInput)
+		restore := leaveInput
+		if session.mouseOriginalPixels {
+			restore = leaveInputEncoding + "\x1b[?1016r" + restoreMouseTracking
+		}
+
+		_, outputError = io.WriteString(session.output, restore)
 	}
 
 	_, screenError := io.WriteString(session.output, leaveScreen)

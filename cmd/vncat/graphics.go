@@ -249,8 +249,24 @@ func (view viewport) point(column, row int) (remotePoint, bool) {
 
 	px := max(0, column*view.cellWidth+view.cellWidth/2)
 	py := max(0, row*view.cellHeight+view.cellHeight/2)
-	remoteX := int64(px) * int64(view.remoteWidth) / int64(view.width)
-	remoteY := int64(py) * int64(view.remoteHeight) / int64(view.height)
+	point, _ := view.pixelPoint(px, py)
+
+	return point, inside
+}
+
+func (view viewport) pixelPoint(pixelX, pixelY int) (remotePoint, bool) {
+	if view.width <= 0 || view.height <= 0 {
+		return remotePoint{}, false
+	}
+
+	inside := pixelX >= 0 && pixelY >= 0 &&
+		pixelX < view.width && pixelY < view.height
+
+	clampedX := max(0, min(view.width, pixelX))
+	clampedY := max(0, min(view.height, pixelY))
+
+	remoteX := int64(clampedX) * int64(view.remoteWidth) / int64(view.width)
+	remoteY := int64(clampedY) * int64(view.remoteHeight) / int64(view.height)
 
 	return remotePoint{
 		x: pointerCoordinate(min(int64(view.remoteWidth-1), remoteX)),
